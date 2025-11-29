@@ -1,0 +1,523 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import time
+import math
+import tracemalloc
+import threading
+import sys
+import gc
+from collections import deque
+
+def get_size(obj):
+    seen = set()
+    q = deque([obj])
+    total = 0
+
+    while q:
+        item = q.popleft()
+        oid = id(item)
+        if oid in seen:
+            continue
+        seen.add(oid)
+
+        try:
+            size = sys.getsizeof(item)
+        except Exception:
+            size = 0
+        total += size
+
+        # Expand children
+        if isinstance(item, dict):
+            for k, v in item.items():
+                q.append(k)
+                q.append(v)
+        elif isinstance(item, (list, tuple, set, deque)):
+            for e in item:
+                q.append(e)
+        else:
+            try:
+                for v in vars(item).values():
+                    q.append(v)
+            except Exception:
+                pass
+
+    return total
+
+def alignment_steps(string1, string2, match = 1, mismatch = -1, gap = -1, mode = "global"):
+    n = len(string1)
+    m = len(string2)
+
+    scores = [[0] * (m + 1) for _ in range(n + 1)]
+    pointers = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+
+    if mode == 'global':
+        for i in range(1, n + 1):
+            scores[i][0] = scores[i - 1][0] + gap
+            pointers[i][0] = ['U']
+        for j in range(1, m + 1):
+            scores[0][j] = scores[0][j - 1] + gap
+            pointers[0][j] = ['L']
+    elif mode == 'local':
+        pass
+
+    yield {'i' : 0, 'j' : 0, 'scores' : [row.copy() for row in scores],
+           'pointers' : [row.copy() for row in pointers], 'current_cell' : None, 'mode' : mode}
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            diag = scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch)
+            up = scores[i - 1][j] + gap
+            left = scores[i][j - 1] + gap
+            best = max(diag, up, left)
+            if mode == 'local':
+                if best <= 0:
+                    scores[i][j] = 0
+                    pointers[i][j] = []
+
+                    yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
+                           'pointers': [row.copy() for row in pointers], 'current_cell' : (i, j), 'mode' : mode}
+                    
+                    continue
+
+            scores[i][j] = best
+            ptrs = []
+            
+            if diag == best:
+                ptrs.append('D')
+            if up == best:
+                ptrs.append('U')
+            if left == best:
+                ptrs.append('L')
+            pointers[i][j] = ptrs
+            yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
+                   'pointers': [row.copy() for row in pointers], 'current_cell' : (i, j), 'mode' : mode}
+
+    yield {'i' : n, 'j' : m, 'scores' : [row.copy() for row in scores],
+           'pointers' : [row.copy() for row in pointers], 'current_cell' : None, 'mode' : mode}
+
+def traceback(string1, string2, pointers, scores, mode = "global"):
+    n = len(string1)
+    m = len(string2)
+
+    if mode == "global":
+        i = n; j = m
+        a1 = []; a2 = []
+
+        while i > 0 or j > 0:
+            ptrs = pointers[i][j] if i >= 0 and j >= 0 else []
+            if 'D' in ptrs:
+                a1.append(string1[i - 1]); a2.append(string2[j - 1])
+                i -= 1; j -= 1
+            elif 'U' in ptrs:
+                a1.append(string1[i - 1]); a2.append('-')
+                i -= 1
+            elif 'L' in ptrs:
+                a1.append('-'); a2.append(string2[j - 1])
+                j -= 1
+            else:
+                if i > 0:
+                    a1.append(string1[i - 1]); a2.append('-')
+                    i -= 1
+                elif j > 0:
+                    a1.append('-'); a2.append(string2[j - 1])
+                    j -= 1
+
+        return ''.join(reversed(a1)), ''.join(reversed(a2)), 0, 0, scores[n][m]
+    
+    elif mode == "local":
+        max_score = -10 ** 9
+        max_pos = (0,0)
+
+        for i2 in range(n + 1):
+            for j2 in range(m + 1):
+                if scores[i2][j2] > max_score:
+                    max_score = scores[i2][j2]
+                    max_pos = (i2, j2)
+
+        if max_score == 0:
+            return "", "", max_pos[0], max_pos[1], 0
+        
+        i, j = max_pos
+        a1 = []; a2 = []
+
+        while i > 0 and j > 0 and scores[i][j] != 0:
+            ptrs = pointers[i][j] if i >= 0 and j >= 0 else []
+
+            if 'D' in ptrs:
+                a1.append(string1[i - 1]); a2.append(string2[j - 1])
+                i -= 1; j -= 1
+            elif 'U' in ptrs:
+                a1.append(string1[i - 1]); a2.append('-')
+                i -= 1
+            elif 'L' in ptrs:
+                a1.append('-'); a2.append(string2[j - 1])
+                j -= 1
+            else:
+                break
+        return ''.join(reversed(a1)), ''.join(reversed(a2)), max_pos[0], max_pos[1], max_score
+    else:
+        raise ValueError("Unknown mode for traceback: " + str(mode))
+    
+# Tkinter GUI Constants
+CELL_SIZE = 52
+HEADER_BG = "#EEE"
+SCORE_BG = "#FFF"
+HIGHLIGHT_BG = "#FFFA8D"
+
+class Alignment:
+    def __init__(self, root): 
+        self.root = root
+        root.title = "Sequence Alignment Optimization Visualizer"
+        self.create_widgets()
+
+        self.cell_widgets = {}
+        self.header_widgets = {}
+        self.autorun_flag = None
+        self.autorun_thread = None
+        self.start_time = None
+        self.end_time = None
+        self.peak_memory_bytes = 0
+
+    def create_widgets(self):
+        frame = ttk.Frame(self.root, padding = 10)
+        frame.grid(row = 0, column = 0, sticky = "nsew")
+
+        # Inputs
+        input_frame = ttk.LabelFrame(frame, text = "Inputs", padding = 10)
+        input_frame.grid(row = 0, column = 0, sticky = "nw", padx = 4, pady = 4)
+        ttk.Label(input_frame, text = "Sequence 1:").grid(row = 0, column = 0, sticky = 'w')
+        self.seq1_string = tk.StringVar(value = "ABCABCABC") # Sequence 1 string variable
+        ttk.Entry(input_frame, textvariable = self.seq1_string, width = 50).grid(row = 0, column = 1, sticky = 'w', padx = 4)
+        ttk.Label(input_frame, text = "Sequence 2:").grid(row = 1, column = 0, sticky = 'w')
+        self.seq2_string = tk.StringVar(value = "ABCCBABCA") # Seuence 2 string variable
+        ttk.Entry(input_frame, textvariable = self.seq2_string, width = 50).grid(row = 1, column = 1, sticky = 'w', padx = 4)
+
+        # Adjustable Match,Mismatch,Gap Values
+        ttk.Label(input_frame, text = "Match:").grid(row = 0, column = 2, sticky = 'e')
+        self.match_value = tk.IntVar(value = 1) # Match Value
+        ttk.Spinbox(input_frame, from_ = -5, to = 10, textvariable = self.match_value, width = 5).grid(row = 0, column = 3, sticky = 'w')
+        ttk.Label(input_frame, text = "Mismatch:").grid(row = 1, column = 2, sticky = 'e')
+        self.mismatch_value = tk.IntVar(value = -1) # Mismatch Value
+        ttk.Spinbox(input_frame, from_ = -10, to = 0, textvariable = self.mismatch_value, width = 5).grid(row = 1, column = 3, sticky = 'w')
+        ttk.Label(input_frame, text = "Gap:").grid(row = 2, column = 2, sticky = 'e')
+        self.gap_value = tk.IntVar(value = -1) # Gap Value
+        ttk.Spinbox(input_frame, from_ = -10, to = 0, textvariable = self.gap_value, width = 5).grid(row = 2, column = 3, sticky = 'w')
+
+        # Mode Selection (Global or Local)
+        ttk.Label(input_frame, text = "Mode:").grid(row = 2, column = 0, sticky = 'w')
+        self.mode_var = tk.StringVar(value = 'global') # Mode Variable
+        mode_frame = ttk.Frame(input_frame)
+        mode_frame.grid(row = 2, column = 1, sticky = 'w', padx = 4)
+        ttk.Radiobutton(mode_frame, text = "Global", variable = self.mode_var, value = 'global').pack(side = 'left')
+        ttk.Radiobutton(mode_frame, text = "Local", variable = self.mode_var, value = 'local').pack(side = 'left')
+
+        # Speed control (milliseconds per step)
+        def on_speed_changed(value):
+            self.speed_var.set(value)
+            self.speed_var_string.set(f"{round(self.speed_var.get(), 2)} ms")
+
+        ttk.Label(input_frame, text = "Step delay (ms):").grid(row = 3, column = 0, sticky = 'w')
+        self.speed_var = tk.DoubleVar(value = 120.0) # Step Delay Variable (in milliseconds)
+        self.speed_scale = ttk.Scale(input_frame, from_ = 0, to = 1000, variable = self.speed_var, command = on_speed_changed, orient = 'horizontal')
+        self.speed_scale.grid(row = 3, column = 1, columnspan = 3, sticky = 'we', padx = 4)
+        self.speed_var_string = tk.StringVar(value = f"{self.speed_var.get()} ms")
+        ttk.Label(input_frame, textvariable = self.speed_var_string).grid(row = 3, column = 4, sticky = 'e')
+
+        # Control buttons
+        ctrl_frame = ttk.Frame(frame)
+        ctrl_frame.grid(row = 1, column = 0, sticky = 'w', pady = 6)
+        ttk.Button(ctrl_frame, text = "Initialize", command = self.initialize).grid(row = 0, column = 0, padx = 4)
+        self.step_btn = ttk.Button(ctrl_frame, text = "Step", command = self.step, state = 'disabled')
+        self.step_btn.grid(row = 0, column = 1, padx = 4)
+        self.auto_btn = ttk.Button(ctrl_frame, text = "Auto", command = self.toggle_autorun, state = 'disabled')
+        self.auto_btn.grid(row = 0, column = 2, padx = 4)
+        self.trace_btn = ttk.Button(ctrl_frame, text = "Traceback", command = self.show_traceback, state = 'disabled')
+        self.trace_btn.grid(row = 0, column = 3, padx = 4)
+        self.export_btn = ttk.Button(ctrl_frame, text = "Export Result", command = self.export_result, state = 'disabled')
+        self.export_btn.grid(row = 0, column = 4, padx = 4)
+        ttk.Button(ctrl_frame, text = "Quit", command = self.root.destroy).grid(row = 0, column = 5, padx = 4)
+
+        # Performance display
+        performance_frame = ttk.Frame(frame)
+        performance_frame.grid(row = 1, column = 1, sticky = 'ne', padx = 8)
+        ttk.Label(performance_frame, text = "Run time (s):").grid(row = 0, column = 0, sticky = 'e')
+        self.time_label = ttk.Label(performance_frame, text = "—")
+        self.time_label.grid(row = 0, column = 1, sticky = 'w', padx = 6)
+        ttk.Label(performance_frame, text = "Peak memory (KiB):").grid(row = 1, column = 0, sticky = 'e')
+        self.mem_label = ttk.Label(performance_frame, text = "—")
+        self.mem_label.grid(row = 1, column = 1, sticky = 'w', padx = 6)
+        ttk.Label(performance_frame, text = "Theoretical Space Usage (KiB):").grid(row = 2, column = 0, sticky = 'e')
+        self.dp_label = ttk.Label(performance_frame, text = "—")
+        self.dp_label.grid(row = 2, column = 1, sticky = 'w', padx = 6)
+        ttk.Label(performance_frame, text = "Space Usage (KiB):").grid(row = 3, column = 0, sticky = 'e')
+        self.mem_total_label = ttk.Label(performance_frame, text = "—")
+        self.mem_total_label.grid(row = 3, column = 1, sticky = 'w', padx = 6)
+
+        # Canvas for matrix
+        self.canvas_frame = ttk.Frame(frame)
+        self.canvas_frame.grid(row = 2, column = 0, columnspan = 2, sticky = 'nsew', pady = 8)
+        self.canvas = tk.Canvas(self.canvas_frame, background = "#DDD")
+        self.canvas.grid(row = 0, column = 0, sticky = 'nsew')
+        # Srollability when matrix is large 
+        self.vbar = ttk.Scrollbar(self.canvas_frame, orient = 'vertical', command = self.canvas.yview)
+        self.hbar = ttk.Scrollbar(self.canvas_frame, orient = 'horizontal', command = self.canvas.xview)
+        self.canvas.configure(yscrollcommand = self.vbar.set, xscrollcommand = self.hbar.set)
+        self.vbar.grid(row = 0, column = 1, sticky = 'ns')
+        self.hbar.grid(row = 1, column = 0, sticky = 'ew')
+
+    def initialize(self):
+        string1 = self.seq1_string.get().strip().upper()
+        string2 = self.seq2_string.get().strip().upper()
+
+        if not string1 or not string2: # If either string is null
+            messagebox.showwarning("Input required", "Please provide both sequences.")
+            return
+        
+        self.string1 = string1; self.string2 = string2
+        self.match = self.match_value.get()
+        self.mismatch = self.mismatch_value.get()
+        self.gap = self.gap_value.get()
+        self.mode = self.mode_var.get()
+
+        # Start performance tracking
+        tracemalloc.stop()
+        tracemalloc.clear_traces()
+        tracemalloc.start()
+        self.start_time = time.perf_counter()
+        self.end_time = None
+        self.peak_memory_bytes = 0
+        self.time_label.config(text = "—")
+        self.mem_label.config(text = "—")
+        self.dp_label.config(text = "—")
+
+        # Create generator
+        self.generator = alignment_steps(self.string1, self.string2, match = self.match, mismatch = self.mismatch, gap = self.gap, mode = self.mode)
+
+        # Reset UI canvas
+        self.canvas.delete('all')
+        self.cell_widgets.clear()
+        self.header_widgets.clear()
+
+        # Compute grid size
+        n = len(self.string1); m = len(self.string2)
+        width = (m + 2) * CELL_SIZE + 20
+        height = (n + 2) * CELL_SIZE + 20
+        self.canvas.config(scrollregion = (0, 0, width, height), width = min(900, width), height = min(420,height))
+
+        # Draw headers (top row: blank then seq2 letters; left col: blank then seq1 letters)
+        x0 = 10; y0 = 10
+        self.draw_header_cell(0, 0, "", x0, y0)
+
+        for j in range(m):
+            self.draw_header_cell(0, j + 1, self.string2[j], x0 + (j + 1) * CELL_SIZE, y0)
+        for i in range(n):
+            self.draw_header_cell(i + 1, 0, self.string1[i], x0, y0 + (i + 1) * CELL_SIZE)
+
+        # Draw matrix cells (including row 0 and col 0 for gaps)
+        for i in range(n + 1):
+            for j in range(m + 1):
+                cx = x0 + (j + 1) * CELL_SIZE
+                cy = y0 + (i + 1) * CELL_SIZE
+                self.draw_score_cell(i, j, cx, cy, value = "")
+
+        # Enable buttons
+        self.step_btn.config(state = 'normal')
+        self.auto_btn.config(state = 'normal')
+        self.trace_btn.config(state = 'disabled')
+        self.export_btn.config(state = 'disabled')
+    
+        # Advance one initial state from generator to populate initial row/col
+        try:
+            state = next(self.generator)
+            self.current_state = state
+            self.update_matrix(state)
+        except StopIteration:
+            pass
+        # Traceback/export only available after finished filling
+        self.traceback_enabled = False
+        self.export_enabled = False
+
+    def draw_header_cell(self, i, j, label, x, y):
+        rect = self.canvas.create_rectangle(x, y, x + CELL_SIZE, y + CELL_SIZE, fill = HEADER_BG, outline = 'black')
+        txt = self.canvas.create_text(x + CELL_SIZE / 2, y + CELL_SIZE / 2, text = label, font = ('TkDefaultFont', 12, 'bold'))
+        self.header_widgets[(i, j)] = {'rect' : rect, 'text' : txt}
+
+    def draw_score_cell(self, i, j, x, y, value = ""):
+        rect = self.canvas.create_rectangle(x, y, x + CELL_SIZE, y + CELL_SIZE, fill = SCORE_BG, outline = 'black')
+        txt = self.canvas.create_text(x + 10, y + 10, anchor = 'nw', text = str(value), font=('TkDefaultFont', 10))
+        ptr_text = self.canvas.create_text(x + CELL_SIZE - 6, y + CELL_SIZE - 6, anchor = 'se', text = "", font = ('TkDefaultFont', 8, 'italic'))
+        self.cell_widgets[(i, j)] = {'rect' : rect, 'text' : txt, 'ptr' : ptr_text, 'x' : x, 'y' : y}
+
+    def update_matrix(self, state):
+        scores = state['scores']; pointers = state['pointers']; mode = state.get('mode', 'global')
+        current = state['current_cell']
+        for (i, j), w in self.cell_widgets.items():
+            val = scores[i][j]
+            self.canvas.itemconfigure(w['text'], text = str(val))
+            ptrs = pointers[i][j]
+            pstr = ''.join(ptrs) if ptrs else ''
+            self.canvas.itemconfigure(w['ptr'], text = pstr)
+            self.canvas.itemconfigure(w['rect'], fill = SCORE_BG)
+
+        if current:
+            i, j = current
+            w = self.cell_widgets.get((i, j))
+            if w:
+                self.canvas.itemconfigure(w['rect'], fill = HIGHLIGHT_BG)
+        else:
+            # Finished filling: stop timer and measure peak memory
+            self.end_time = time.perf_counter()
+            try:
+                _, peak_bytes = tracemalloc.get_traced_memory()
+                print(peak_bytes)
+                if peak_bytes > self.peak_memory_bytes:
+                    self.peak_memory_bytes = peak_bytes
+            except Exception:
+                self.peak_memory_bytes = 0
+            tracemalloc.stop()
+
+            # Compute and display run time, memory and estimated DP space
+            if self.start_time is None:
+                elapsed = 0.0
+            else:
+                elapsed = (self.end_time - self.start_time)
+            self.time_label.config(text = f"{elapsed:.4f}")
+
+            if self.peak_memory_bytes is not None:
+                self.mem_label.config(text = f"{self.peak_memory_bytes / 1024.0:.2f}")
+            else:
+                self.mem_label.config(text = "N/A")
+
+            # Estimate DP space: number of cells * 8 bytes (size of int)
+            n = len(self.string1); m = len(self.string2)
+            est_bytes = (n + 1) * (m + 1) * 8
+            self.dp_label.config(text = f"{est_bytes / 1024.0:.2f}")
+            self.trace_btn.config(state = 'normal')
+            self.export_btn.config(state = 'normal')
+            self.traceback_enabled = True
+            self.export_enabled = True
+
+        self.last_scores = scores
+        self.last_pointers = pointers
+        self.last_mode = mode
+
+        # Getting Space Usage
+        try:
+            if getattr(self, "_measured_dp_bytes", None) is not None:
+                total_dp_bytes = self._measured_dp_bytes
+            else:
+                gc.collect()
+                total_dp_bytes = get_size(self.last_scores) + get_size(self.last_pointers)
+
+            self.mem_total_label.config(text = f"{total_dp_bytes / 1024.0:.2f}")
+        except Exception:
+            self.mem_total_label.config(text = "N/A")
+    
+    def step(self):
+        if not self.generator:
+            return
+        try:
+            state = next(self.generator)
+            self.current_state = state
+            self.update_matrix(state)
+
+            if state['current_cell'] is None:
+                self.step_btn.config(state = 'disabled')
+                self.auto_btn.config(state = 'disabled')
+                self.trace_btn.config(state = 'normal')
+                self.export_btn.config(state = 'normal')
+        except StopIteration:
+            print("Done Stepping")
+
+        # Getting Space Usage
+        try:
+            s_bytes = get_size(state['scores'])
+            p_bytes = get_size(state['pointers'])
+            total_dp_bytes = s_bytes + p_bytes
+            self._measured_dp_bytes = total_dp_bytes
+            self.mem_total_label.config(text = f"{self._measured_dp_bytes / 1024.0:.2f}")
+        except Exception:
+            pass
+
+    def toggle_autorun(self):
+        if not self.generator:
+            return
+        if not self.autorun_flag:
+            self.autorun_flag = True
+            self.auto_btn.config(text = 'Stop')
+            self.step_btn.config(state = 'disabled')
+            t = threading.Thread(target = self.autorun_worker, daemon = True)
+            t.start()
+            self.autorun_thread = t
+        else:
+            self.autorun_flag = False
+            self.auto_btn.config(text = 'Auto')
+            self.step_btn.config(state = 'normal')
+
+    def autorun_worker(self):
+        while self.autorun_flag:
+            try:
+                state = next(self.generator)
+                self.current_state = state
+
+                # Schedule the update on the main UI thread
+                self.root.after(0, lambda s = state : self.update_matrix(s))
+
+                # Updating memory peak
+                try:
+                    _, peak_bytes = tracemalloc.get_traced_memory()
+                    if peak_bytes > self.peak_memory_bytes:
+                        self.peak_memory_bytes = peak_bytes
+                except Exception:
+                    pass
+
+                # Getting space usage
+                try:
+                    s_bytes = get_size(state['scores'])
+                    p_bytes = get_size(state['pointers'])
+                    total_dp_bytes = s_bytes + p_bytes
+                    
+                    self._measured_dp_bytes = total_dp_bytes
+                    self.root.after(0, lambda : self.mem_total_label.config(
+                        text = f"{self._measured_dp_bytes / 1024.0:.2f}"))
+                except Exception:
+                    pass
+
+                if state['current_cell'] is None:
+                    break
+
+                # Sleep according to speed slider
+                delay_ms = self.speed_var.get() if hasattr(self, 'speed_var') else 120.0
+                time.sleep(delay_ms / 1000.0)
+            except StopIteration:
+                break
+
+        self.autorun_flag = False
+        self.root.after(0, lambda : self.auto_btn.config(text = 'Auto'))
+
+    def show_traceback(self):
+        # If the matrix is not full
+        if not hasattr(self, 'last_pointers') or not hasattr(self, 'last_scores'):
+            messagebox.showinfo("Not ready", "Matrix not filled yet.")
+            return
+        
+        a1, a2, si, sj, score = traceback(self.string1, self.string2, self.last_pointers, self.last_scores, mode = self.last_mode)
+
+        if self.last_mode == 'global':
+            text = f"Global alignment - Score: {score}\n\n{a1}\n{a2}"
+        else:
+            text = f"Local alignment - Score: {score} at cell ({si}, {sj})\n\n{a1}\n{a2}"
+
+        messagebox.showinfo("Traceback result", text)
+        self.export_enabled = True
+
+    def export_result(self):
+        print("Exporting")
+
+def main():
+    root = tk.Tk()
+    app = Alignment(root)
+    root.mainloop()
+
+if __name__ == '__main__':
+    main()
