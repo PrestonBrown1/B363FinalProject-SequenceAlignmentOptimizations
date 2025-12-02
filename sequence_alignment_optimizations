@@ -6,7 +6,7 @@ import tracemalloc
 import threading
 import sys
 import gc
-from collections import deque
+from collections import deque, defaultdict
 
 def get_size(obj):
     seen = set()
@@ -16,7 +16,7 @@ def get_size(obj):
     while q:
         item = q.popleft()
         oid = id(item)
-        if oid in seen:
+        if oid in seen: # If the item has been seen before
             continue
         seen.add(oid)
 
@@ -43,129 +43,496 @@ def get_size(obj):
 
     return total
 
-def alignment_steps(string1, string2, match = 1, mismatch = -1, gap = -1, mode = "global"):
+def alignment_steps(string1, string2, match = 1, mismatch = -1, gap = -1,
+                    mode = "global", save_pointers = True,
+                    section_type = "none"):
+   
     n = len(string1)
     m = len(string2)
 
-    scores = [[0] * (m + 1) for _ in range(n + 1)]
-    pointers = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+    def score_diag(i, j):
+        return (match if string1[i - 1] == string2[j - 1] else mismatch)
 
+    INF_NEG = -10 ** 9
+
+    if section_type == 'none':
+        # Basic full storage
+        scores = [[0] * (m + 1) for _ in range(n + 1)]
+        pointers = [[[] for _ in range(m + 1)] for _ in range(n + 1)] if save_pointers else None # Initialize pointers if save_pointers = True
+
+        # Initialization of i and j rows
+        if mode == 'global':
+            for i in range(1, n + 1):
+                scores[i][0] = scores[i - 1][0] + gap
+                if save_pointers:
+                    pointers[i][0] = ['U']
+            for j in range(1, m + 1):
+                scores[0][j] = scores[0][j - 1] + gap
+                if save_pointers:
+                    pointers[0][j] = ['L']
+
+        yield {'i' : 0, 'j' : 0, 'scores' : [row.copy() for row in scores],
+               'pointers' : [row.copy() for row in (pointers if pointers is not None else [[[] for _ in range(m + 1)] for _ in range(n + 1)])],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type}
+
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                diag = scores[i - 1][j - 1] + score_diag(i, j)
+                up = scores[i - 1][j] + gap
+                left = scores[i][j - 1] + gap
+                best = max(diag, up, left)
+                if mode == 'local' and best <= 0:
+                    scores[i][j] = 0
+                    if save_pointers:
+                        pointers[i][j] = []
+                    yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
+                           'pointers': [row.copy() for row in (pointers if pointers is not None else [[[] for _ in range(m + 1)] for _ in range(n + 1)])],
+                           'current_cell' : (i, j), 'mode' : mode, 'save_pointers' : save_pointers,
+                           'section_type' : section_type}
+                    continue
+
+                scores[i][j] = best
+
+                if save_pointers:
+                    ptrs = []
+                    if diag == best:
+                        ptrs.append('D')
+                    if up == best:
+                        ptrs.append('U')
+                    if left == best:
+                        ptrs.append('L')
+                    pointers[i][j] = ptrs
+                    
+                yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
+                       'pointers': [row.copy() for row in (pointers if pointers is not None else [[[] for _ in range(m + 1)] for _ in range(n + 1)])],
+                       'current_cell' : (i, j), 'mode' : mode, 'save_pointers' : save_pointers,
+                       'section_type' : section_type}
+
+        yield {'i' : n, 'j' : m, 'scores' : [row.copy() for row in scores],
+               'pointers' : [row.copy() for row in (pointers if pointers is not None else [[[] for _ in range(m + 1)] for _ in range(n + 1)])],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type}
+
+    elif section_type == "row":
+        # Row-by-row: keep only two rows of scores active
+        # pointers_checkpoint: k: row_index v: list of pointer lists for that row
+        scores_row_prev = [0] * (m + 1)
+        scores_row_curr = [0] * (m + 1)
+        pointers_checkpoint = {} if save_pointers else {}
+        display_scores = [[None] * (m + 1) for _ in range(n + 1)]
+        display_pointers = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+
+        # Initialize row 0
+        scores_row_prev[0] = 0
+        display_scores[0][0] = 0
+
+        if mode == 'global':
+            for j in range(1, m + 1):
+                scores_row_prev[j] = scores_row_prev[j - 1] + gap
+                display_scores[0][j] = scores_row_prev[j]
+
+                if save_pointers:
+                    display_pointers[0][j] = ['L']
+            if save_pointers:
+                pointers_checkpoint[0] = [list(p) for p in display_pointers[0]]
+        else:
+            # Set them to 0
+            for j in range(0, m + 1):
+                display_scores[0][j] = 0
+
+        # Yielding initial state
+        yield {'i' : 0, 'j' : 0, 'scores' : [row.copy() for row in display_scores],
+               'pointers' : [row.copy() for row in display_pointers],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type}
+
+        for i in range(1, n + 1):
+            # Current row
+            scores_row_curr = [0] * (m + 1)
+            if mode == 'global':
+                scores_row_curr[0] = scores_row_prev[0] + gap
+                display_scores[i][0] = scores_row_curr[0]
+                if save_pointers:
+                    display_pointers[i][0] = ['U']
+
+            elif mode == 'local':
+                scores_row_curr[0] = 0
+                display_scores[i][0] = 0
+
+            row_pointers = [[] for _ in range(m + 1)]
+            if save_pointers:
+                row_pointers[0] = list(display_pointers[i][0])
+
+            for j in range(1, m + 1):
+                diag = scores_row_prev[j - 1] + score_diag(i, j)
+                up = scores_row_prev[j] + gap
+                left = scores_row_curr[j - 1] + gap
+                best = max(diag, up, left)
+
+                if mode == 'local' and best <= 0:
+                    scores_row_curr[j] = 0
+                    row_pointers[j] = []
+                    display_scores[i][j] = 0
+                    display_pointers[i][j] = []
+
+                    # Yielding current state
+                    yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in display_scores],
+                           'pointers' : [row.copy() for row in display_pointers],
+                           'current_cell' : (i, j), 'mode' : mode, 'save_pointers' : save_pointers,
+                           'section_type' : section_type}
+                    continue
+
+                scores_row_curr[j] = best
+                display_scores[i][j] = best
+                ptrs = []
+
+                if diag == best:
+                    ptrs.append('D')
+                if up == best:
+                    ptrs.append('U')
+                if left == best:
+                    ptrs.append('L')
+
+                row_pointers[j] = ptrs
+                display_pointers[i][j] = list(ptrs)
+
+                yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in display_scores],
+                       'pointers' : [row.copy() for row in display_pointers],
+                       'current_cell' : (i, j), 'mode' : mode, 'save_pointers' : save_pointers,
+                       'section_type' : section_type}
+
+            # Checkpoint pointers if save_pointers = True
+            if save_pointers:
+                pointers_checkpoint[i] = [list(p) for p in row_pointers]
+
+            # Discard previous row scores to save memory 
+            scores_row_prev = scores_row_curr
+
+            # display_scores stays filled for UI, but are set to None
+            if i - 2 >= 0:
+                for j in range(0, m + 1):
+                    display_scores[i - 2][j] = None
+                    display_pointers[i - 2][j] = []
+
+        # Yielding final state
+        yield {'i' : n, 'j' : m, 'scores' : [row.copy() for row in display_scores],
+               'pointers' : [row.copy() for row in display_pointers],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type, 'pointers_checkpoint' : pointers_checkpoint}
+
+    elif section_type == 'prune':
+        # Pruning strategy: keep only active cells whose optimistic upper-bound could reach current best.
+
+        display_scores = [[None] * (m + 1) for _ in range(n + 1)]
+        display_pointers = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+        active_cells = {}  # (i,j)
+        active_ptrs = {}   # (i,j)
+
+        # Initialize row 0
+        if mode == 'global':
+            for j in range(0, m + 1):
+                val = j * gap
+                active_cells[(0, j)] = val
+                display_scores[0][j] = val
+                display_pointers[0][j] = ['L'] if j > 0 else []
+        else:
+            active_cells[(0, 0)] = 0
+            display_scores[0][0] = 0
+
+        yield {'i' : 0, 'j' : 0, 'scores' : [row.copy() for row in display_scores],
+               'pointers' : [row.copy() for row in display_pointers],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type}
+
+        current_best = max(active_cells.values()) if active_cells else INF_NEG
+
+        for i in range(1, n + 1):
+            new_active = {}
+            new_ptrs = {}
+
+            for j in range(0, m + 1):
+                candidates = []
+                # Diag
+                if (i - 1, j - 1) in active_cells and j - 1 >= 0:
+                    candidates.append((active_cells[(i - 1, j - 1)] + score_diag(i, j), 'D'))
+                # Up
+                if (i - 1, j) in active_cells:
+                    candidates.append((active_cells[(i - 1, j)] + gap, 'U'))
+                # Left
+                if (i, j - 1) in new_active:
+                    candidates.append((new_active[(i, j - 1)], None))  # Left is already computed
+                elif (i, j - 1) in active_cells:
+                    candidates.append((active_cells[(i, j - 1)] + gap, 'L'))
+
+                if not candidates:
+                    continue
+
+                # Find max
+                best_score = max([c[0] for c in candidates])
+
+                if mode == 'local' and best_score <= 0:
+                    best_score = 0
+                    ptr_list = []
+                else:
+                    ptr_list = []
+
+                    # Diag
+                    if (i - 1, j - 1) in active_cells and j - 1 >= 0:
+                        if active_cells[(i - 1, j - 1)] + score_diag(i, j) == best_score:
+                            ptr_list.append('D')
+                    if (i - 1, j) in active_cells:
+                        if active_cells[(i - 1, j)] + gap == best_score:
+                            ptr_list.append('U')
+                    if (i, j - 1) in new_active:
+                        if new_active[(i, j - 1)] + gap == best_score:
+                            ptr_list.append('L')
+                    elif (i, j - 1) in active_cells:
+                        if active_cells[(i, j - 1)] + gap == best_score:
+                            ptr_list.append('L')
+
+                new_active[(i, j)] = best_score
+                new_ptrs[(i, j)] = ptr_list
+                display_scores[i][j] = best_score
+                display_pointers[i][j] = list(ptr_list)
+
+                # Update current_best
+                if best_score > current_best:
+                    current_best = best_score
+
+            # Prune: drop any cell whose optimistic upper-bound cannot reach current_best.
+            optimistic_match_value = max(match, 0)
+            pruned_active = {}
+            pruned_ptrs = {}
+            for (ci, cj), sc in new_active.items():
+                remaining_cells = min(n - ci, m - cj)
+                upper_bound = sc + remaining_cells * optimistic_match_value
+
+                if upper_bound + 1e-9 >= current_best:  # Keep if could still reach current_best
+                    pruned_active[(ci, cj)] = sc
+                    pruned_ptrs[(ci, cj)] = new_ptrs.get((ci, cj), [])
+                else:
+                    # Display stays even when pruned for UI
+                    display_scores[ci][cj] = None
+                    display_pointers[ci][cj] = []
+
+            active_cells = pruned_active
+            active_ptrs = pruned_ptrs
+
+            # Yield progress
+            yield {'i' : i, 'j' : 0, 'scores' : [row.copy() for row in display_scores],
+                   'pointers' : [row.copy() for row in display_pointers],
+                   'current_cell' : (i, None), 'mode' : mode, 'save_pointers' : save_pointers,
+                   'section_type' : section_type, 'active_cells' : dict(active_cells)}
+
+        # Yielding final state
+        yield {'i' : n, 'j' : m, 'scores' : [row.copy() for row in display_scores],
+               'pointers' : [row.copy() for row in display_pointers],
+               'current_cell' : None, 'mode' : mode, 'save_pointers' : save_pointers,
+               'section_type' : section_type, 'active_cells' : dict(active_cells), 'active_ptrs' : dict(active_ptrs)}
+
+def traceback_with_timing(string1, string2, scores, pointers,
+                          mode = "global", save_pointers = True,
+                          match = 1, mismatch = -1, gap = -1,
+                          section_type = "none", extra_info = None):
+    # section_type == "none": reconstruct from scores directly.
+    # section_type == "row" and no pointers checkpoints: rerun a non-sectioned DP to reconstruct.
+    # section_type == "prune": use active_ptrs for pointer-based traceback.
+
+    t0 = time.perf_counter() # Start counter
+
+    n = len(string1); m = len(string2)
+
+    # Pointer-based traceback helper
+    def pointer_traceback(local_pointers, local_scores):
+        if mode == 'global':
+            i = n; j = m
+            a1 = []; a2 = []
+            while i > 0 or j > 0:
+                ptrs = local_pointers[i][j] if (i >= 0 and j >= 0 and local_pointers and i < len(local_pointers) and j < len(local_pointers[0])) else []
+
+                if 'D' in ptrs:
+                    a1.append(string1[i - 1]); a2.append(string2[j - 1])
+                    i -= 1; j -= 1
+                elif 'U' in ptrs:
+                    a1.append(string1[i - 1]); a2.append('-')
+                    i -= 1
+                elif 'L' in ptrs:
+                    a1.append('-'); a2.append(string2[j - 1])
+                    j -= 1
+                else:
+                    if i > 0 and j > 0 and local_scores[i][j] == local_scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch):
+                        a1.append(string1[i - 1]); a2.append(string2[j - 1]); i -= 1; j -= 1
+                    elif i > 0 and local_scores[i][j] == local_scores[i - 1][j] + gap:
+                        a1.append(string1[i - 1]); a2.append('-'); i -= 1
+                    elif j > 0 and local_scores[i][j] == local_scores[i][j - 1] + gap:
+                        a1.append('-'); a2.append(string2[j - 1]); j -= 1
+                    else:
+                        # Last resort
+                        if i > 0:
+                            a1.append(string1[i - 1]); a2.append('-'); i -= 1
+                        elif j > 0:
+                            a1.append('-'); a2.append(string2[j - 1]); j -= 1
+
+            return ''.join(reversed(a1)), ''.join(reversed(a2)), 0, 0, local_scores[n][m]
+
+        elif mode == "local":
+            # find max
+            max_score = -10 ** 9
+            max_pos = (0, 0)
+            for i2 in range(n + 1):
+                for j2 in range(m + 1):
+                    val = local_scores[i2][j2]
+                    if val is None:
+                        continue
+                    if val > max_score:
+                        max_score = val
+                        max_pos = (i2, j2)
+            if max_score <= 0:
+                return "", "", max_pos[0], max_pos[1], 0
+
+            i, j = max_pos
+            a1 = []; a2 = []
+            while i > 0 and j > 0 and local_scores[i][j] != 0:
+                ptrs = local_pointers[i][j] if (i >= 0 and j >= 0 and local_pointers and i < len(local_pointers) and j < len(local_pointers[0])) else []
+                if 'D' in ptrs:
+                    a1.append(string1[i - 1]); a2.append(string2[j - 1])
+                    i -= 1; j -= 1
+                elif 'U' in ptrs:
+                    a1.append(string1[i - 1]); a2.append('-'); i -= 1
+                elif 'L' in ptrs:
+                    a1.append('-'); a2.append(string2[j - 1]); j -= 1
+                else:
+                    # infer via scoring
+                    if i > 0 and j > 0 and local_scores[i][j] == local_scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch):
+                        a1.append(string1[i - 1]); a2.append(string2[j - 1]); i -= 1; j -= 1
+                    elif i > 0 and local_scores[i][j] == local_scores[i - 1][j] + gap:
+                        a1.append(string1[i - 1]); a2.append('-'); i -= 1
+                    elif j > 0 and local_scores[i][j] == local_scores[i][j - 1] + gap:
+                        a1.append('-'); a2.append(string2[j - 1]); j -= 1
+                    else:
+                        break
+            return ''.join(reversed(a1)), ''.join(reversed(a2)), max_pos[0], max_pos[1], max_score
+        else:
+            raise ValueError("Unknown mode for traceback: " + str(mode))
+
+    # If pointers are available
+    if pointers is not None and isinstance(pointers, list) and len(pointers) == len(scores):
+        aligned1, aligned2, si, sj, sc = pointer_traceback(pointers, scores)
+        t1 = time.perf_counter()
+        return aligned1, aligned2, si, sj, sc, (t1 - t0) * 1000.0
+
+    # When section_type == "prune" and extra_info provides active_ptrs
+    if section_type == "prune" and extra_info is not None:
+        active_ptrs = extra_info.get('active_ptrs')
+        active_cells = extra_info.get('active_cells')
+        reconstructed_ptrs = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+        reconstructed_scores = [[None for _ in range(m + 1)] for _ in range(n + 1)]
+
+        if active_cells:
+            for (ci, cj), val in active_cells.items():
+                reconstructed_scores[ci][cj] = val
+        if active_ptrs:
+            for (ci, cj), pl in active_ptrs.items():
+                reconstructed_ptrs[ci][cj] = list(pl)
+        # Some cells may be None. If so, fall back to 0
+        for i in range(n + 1):
+            for j in range(m + 1):
+                if reconstructed_scores[i][j] is None:
+                    # If it's a pruned cell, leave None.
+                    pass
+
+        aligned1, aligned2, si, sj, sc = pointer_traceback(reconstructed_ptrs, [[0 if x is None else x for x in row] for row in reconstructed_scores])
+        t1 = time.perf_counter() # Get time
+
+        return aligned1, aligned2, si, sj, sc, (t1 - t0) * 1000.0
+
+    # Traceback like normal (reconstruct from full matrix)
+    full_scores_possible = True
+
+    if isinstance(scores, list):
+        for row in scores:
+            if any(v is None for v in row):
+                full_scores_possible = False
+                break
+    else:
+        full_scores_possible = False
+
+    if full_scores_possible:
+        inferred_ptrs = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+
+        for i in range(0, n + 1):
+            for j in range(0, m + 1):
+                if i == 0 and j == 0:
+                    inferred_ptrs[i][j] = []
+                    continue
+
+                cur = scores[i][j]
+                if i > 0 and j > 0 and cur == scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch):
+                    inferred_ptrs[i][j].append('D')
+                if i > 0 and cur == scores[i - 1][j] + gap:
+                    inferred_ptrs[i][j].append('U')
+                if j > 0 and cur == scores[i][j - 1] + gap:
+                    inferred_ptrs[i][j].append('L')
+
+        aligned1, aligned2, si, sj, sc = pointer_traceback(inferred_ptrs, scores)
+        t1 = time.perf_counter() # Get time
+
+        return aligned1, aligned2, si, sj, sc, (t1 - t0) * 1000.0
+
+    # When nothing is stored
+    recompute_scores = [[0] * (m + 1) for _ in range(n + 1)]
+    recompute_ptrs = [[[] for _ in range(m + 1)] for _ in range(n + 1)]
+
+    # Initialization
     if mode == 'global':
         for i in range(1, n + 1):
-            scores[i][0] = scores[i - 1][0] + gap
-            pointers[i][0] = ['U']
+            recompute_scores[i][0] = recompute_scores[i - 1][0] + gap
+            recompute_ptrs[i][0] = ['U']
         for j in range(1, m + 1):
-            scores[0][j] = scores[0][j - 1] + gap
-            pointers[0][j] = ['L']
-    elif mode == 'local':
+            recompute_scores[0][j] = recompute_scores[0][j - 1] + gap
+            recompute_ptrs[0][j] = ['L']
+    else:
         pass
-
-    yield {'i' : 0, 'j' : 0, 'scores' : [row.copy() for row in scores],
-           'pointers' : [row.copy() for row in pointers], 'current_cell' : None, 'mode' : mode}
 
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            diag = scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch)
-            up = scores[i - 1][j] + gap
-            left = scores[i][j - 1] + gap
+            diag = recompute_scores[i - 1][j - 1] + (match if string1[i - 1] == string2[j - 1] else mismatch)
+            up = recompute_scores[i - 1][j] + gap
+            left = recompute_scores[i][j - 1] + gap
             best = max(diag, up, left)
-            if mode == 'local':
-                if best <= 0:
-                    scores[i][j] = 0
-                    pointers[i][j] = []
 
-                    yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
-                           'pointers': [row.copy() for row in pointers], 'current_cell' : (i, j), 'mode' : mode}
-                    
-                    continue
+            if mode == 'local' and best <= 0:
+                recompute_scores[i][j] = 0
+                recompute_ptrs[i][j] = []
+                continue
 
-            scores[i][j] = best
-            ptrs = []
-            
+            recompute_scores[i][j] = best
+            pl = []
+
             if diag == best:
-                ptrs.append('D')
+                pl.append('D')
             if up == best:
-                ptrs.append('U')
+                pl.append('U')
             if left == best:
-                ptrs.append('L')
-            pointers[i][j] = ptrs
-            yield {'i' : i, 'j' : j, 'scores' : [row.copy() for row in scores],
-                   'pointers': [row.copy() for row in pointers], 'current_cell' : (i, j), 'mode' : mode}
+                pl.append('L')
 
-    yield {'i' : n, 'j' : m, 'scores' : [row.copy() for row in scores],
-           'pointers' : [row.copy() for row in pointers], 'current_cell' : None, 'mode' : mode}
+            recompute_ptrs[i][j] = pl
 
-def traceback(string1, string2, pointers, scores, mode = "global"):
-    n = len(string1)
-    m = len(string2)
+    # Use pointer-based traceback on recomputed arrays
+    aligned1, aligned2, si, sj, sc = pointer_traceback(recompute_ptrs, recompute_scores)
+    t1 = time.perf_counter() # Getting time
 
-    if mode == "global":
-        i = n; j = m
-        a1 = []; a2 = []
+    return aligned1, aligned2, si, sj, sc, (t1 - t0) * 1000.0
 
-        while i > 0 or j > 0:
-            ptrs = pointers[i][j] if i >= 0 and j >= 0 else []
-            if 'D' in ptrs:
-                a1.append(string1[i - 1]); a2.append(string2[j - 1])
-                i -= 1; j -= 1
-            elif 'U' in ptrs:
-                a1.append(string1[i - 1]); a2.append('-')
-                i -= 1
-            elif 'L' in ptrs:
-                a1.append('-'); a2.append(string2[j - 1])
-                j -= 1
-            else:
-                if i > 0:
-                    a1.append(string1[i - 1]); a2.append('-')
-                    i -= 1
-                elif j > 0:
-                    a1.append('-'); a2.append(string2[j - 1])
-                    j -= 1
-
-        return ''.join(reversed(a1)), ''.join(reversed(a2)), 0, 0, scores[n][m]
-    
-    elif mode == "local":
-        max_score = -10 ** 9
-        max_pos = (0,0)
-
-        for i2 in range(n + 1):
-            for j2 in range(m + 1):
-                if scores[i2][j2] > max_score:
-                    max_score = scores[i2][j2]
-                    max_pos = (i2, j2)
-
-        if max_score == 0:
-            return "", "", max_pos[0], max_pos[1], 0
-        
-        i, j = max_pos
-        a1 = []; a2 = []
-
-        while i > 0 and j > 0 and scores[i][j] != 0:
-            ptrs = pointers[i][j] if i >= 0 and j >= 0 else []
-
-            if 'D' in ptrs:
-                a1.append(string1[i - 1]); a2.append(string2[j - 1])
-                i -= 1; j -= 1
-            elif 'U' in ptrs:
-                a1.append(string1[i - 1]); a2.append('-')
-                i -= 1
-            elif 'L' in ptrs:
-                a1.append('-'); a2.append(string2[j - 1])
-                j -= 1
-            else:
-                break
-        return ''.join(reversed(a1)), ''.join(reversed(a2)), max_pos[0], max_pos[1], max_score
-    else:
-        raise ValueError("Unknown mode for traceback: " + str(mode))
-    
-# Tkinter GUI Constants
+# Tk GUI Constants
 CELL_SIZE = 52
 HEADER_BG = "#EEE"
 SCORE_BG = "#FFF"
 HIGHLIGHT_BG = "#FFFA8D"
 
 class Alignment:
-    def __init__(self, root): 
+    def __init__(self, root):
         self.root = root
         root.title = "Sequence Alignment Optimization Visualizer"
         self.create_widgets()
@@ -186,26 +553,35 @@ class Alignment:
         input_frame = ttk.LabelFrame(frame, text = "Inputs", padding = 10)
         input_frame.grid(row = 0, column = 0, sticky = "nw", padx = 4, pady = 4)
         ttk.Label(input_frame, text = "Sequence 1:").grid(row = 0, column = 0, sticky = 'w')
-        self.seq1_string = tk.StringVar(value = "ABCABCABC") # Sequence 1 string variable
+        self.seq1_string = tk.StringVar(value = "ABCABCABC")
         ttk.Entry(input_frame, textvariable = self.seq1_string, width = 50).grid(row = 0, column = 1, sticky = 'w', padx = 4)
         ttk.Label(input_frame, text = "Sequence 2:").grid(row = 1, column = 0, sticky = 'w')
-        self.seq2_string = tk.StringVar(value = "ABCCBABCA") # Seuence 2 string variable
+        self.seq2_string = tk.StringVar(value = "ABCCBABCA")
         ttk.Entry(input_frame, textvariable = self.seq2_string, width = 50).grid(row = 1, column = 1, sticky = 'w', padx = 4)
 
-        # Adjustable Match,Mismatch,Gap Values
+        # Optimization toggles
+        self.save_pointers_var = tk.BooleanVar(value = True)
+        ttk.Checkbutton(input_frame, text = "Save pointers for traceback", variable = self.save_pointers_var).grid(row = 4, column = 0, columnspan = 2, sticky = 'w', pady = 4)
+        ttk.Label(input_frame, text = "Sectioning mode:").grid(row = 5, column = 2, sticky = 'e')
+        self.section_type_var = tk.StringVar(value = 'none')
+        section_menu = ttk.OptionMenu(input_frame, self.section_type_var, 'none', 'none', 'row', 'prune')
+        section_menu.grid(row = 5, column = 3, sticky = 'w', padx = 4)
+        ttk.Label(input_frame, text = "(none / row / prune)").grid(row = 5, column = 4, sticky = 'w')
+
+        # Adjustable Match, Mismatch, and Gap Values
         ttk.Label(input_frame, text = "Match:").grid(row = 0, column = 2, sticky = 'e')
-        self.match_value = tk.IntVar(value = 1) # Match Value
+        self.match_value = tk.IntVar(value = 1)
         ttk.Spinbox(input_frame, from_ = -5, to = 10, textvariable = self.match_value, width = 5).grid(row = 0, column = 3, sticky = 'w')
         ttk.Label(input_frame, text = "Mismatch:").grid(row = 1, column = 2, sticky = 'e')
-        self.mismatch_value = tk.IntVar(value = -1) # Mismatch Value
+        self.mismatch_value = tk.IntVar(value = -1)
         ttk.Spinbox(input_frame, from_ = -10, to = 0, textvariable = self.mismatch_value, width = 5).grid(row = 1, column = 3, sticky = 'w')
         ttk.Label(input_frame, text = "Gap:").grid(row = 2, column = 2, sticky = 'e')
-        self.gap_value = tk.IntVar(value = -1) # Gap Value
+        self.gap_value = tk.IntVar(value = -1)
         ttk.Spinbox(input_frame, from_ = -10, to = 0, textvariable = self.gap_value, width = 5).grid(row = 2, column = 3, sticky = 'w')
 
         # Mode Selection (Global or Local)
         ttk.Label(input_frame, text = "Mode:").grid(row = 2, column = 0, sticky = 'w')
-        self.mode_var = tk.StringVar(value = 'global') # Mode Variable
+        self.mode_var = tk.StringVar(value = 'global')
         mode_frame = ttk.Frame(input_frame)
         mode_frame.grid(row = 2, column = 1, sticky = 'w', padx = 4)
         ttk.Radiobutton(mode_frame, text = "Global", variable = self.mode_var, value = 'global').pack(side = 'left')
@@ -217,7 +593,7 @@ class Alignment:
             self.speed_var_string.set(f"{round(self.speed_var.get(), 2)} ms")
 
         ttk.Label(input_frame, text = "Step delay (ms):").grid(row = 3, column = 0, sticky = 'w')
-        self.speed_var = tk.DoubleVar(value = 120.0) # Step Delay Variable (in milliseconds)
+        self.speed_var = tk.DoubleVar(value = 120.0)
         self.speed_scale = ttk.Scale(input_frame, from_ = 0, to = 1000, variable = self.speed_var, command = on_speed_changed, orient = 'horizontal')
         self.speed_scale.grid(row = 3, column = 1, columnspan = 3, sticky = 'we', padx = 4)
         self.speed_var_string = tk.StringVar(value = f"{self.speed_var.get()} ms")
@@ -252,13 +628,16 @@ class Alignment:
         ttk.Label(performance_frame, text = "Space Usage (KiB):").grid(row = 3, column = 0, sticky = 'e')
         self.mem_total_label = ttk.Label(performance_frame, text = "—")
         self.mem_total_label.grid(row = 3, column = 1, sticky = 'w', padx = 6)
+        ttk.Label(performance_frame, text = "Traceback time (ms):").grid(row = 4, column = 0, sticky = 'e')
+        self.trace_time_label = ttk.Label(performance_frame, text = "—")
+        self.trace_time_label.grid(row = 4, column = 1, sticky = 'w', padx = 6)
 
         # Canvas for matrix
         self.canvas_frame = ttk.Frame(frame)
         self.canvas_frame.grid(row = 2, column = 0, columnspan = 2, sticky = 'nsew', pady = 8)
         self.canvas = tk.Canvas(self.canvas_frame, background = "#DDD")
         self.canvas.grid(row = 0, column = 0, sticky = 'nsew')
-        # Srollability when matrix is large 
+        # Scrollbars
         self.vbar = ttk.Scrollbar(self.canvas_frame, orient = 'vertical', command = self.canvas.yview)
         self.hbar = ttk.Scrollbar(self.canvas_frame, orient = 'horizontal', command = self.canvas.xview)
         self.canvas.configure(yscrollcommand = self.vbar.set, xscrollcommand = self.hbar.set)
@@ -269,15 +648,17 @@ class Alignment:
         string1 = self.seq1_string.get().strip().upper()
         string2 = self.seq2_string.get().strip().upper()
 
-        if not string1 or not string2: # If either string is null
+        if not string1 or not string2:
             messagebox.showwarning("Input required", "Please provide both sequences.")
             return
-        
+
         self.string1 = string1; self.string2 = string2
         self.match = self.match_value.get()
         self.mismatch = self.mismatch_value.get()
         self.gap = self.gap_value.get()
         self.mode = self.mode_var.get()
+        self.save_pointers = bool(self.save_pointers_var.get())
+        self.section_type = self.section_type_var.get()
 
         # Start performance tracking
         tracemalloc.stop()
@@ -289,9 +670,14 @@ class Alignment:
         self.time_label.config(text = "—")
         self.mem_label.config(text = "—")
         self.dp_label.config(text = "—")
+        self.trace_time_label.config(text = "—")
 
-        # Create generator
-        self.generator = alignment_steps(self.string1, self.string2, match = self.match, mismatch = self.mismatch, gap = self.gap, mode = self.mode)
+        # Create generator with optimization flags
+        self.generator = alignment_steps(self.string1, self.string2,
+                                         match = self.match, mismatch = self.mismatch,
+                                         gap = self.gap, mode = self.mode,
+                                         save_pointers = self.save_pointers,
+                                         section_type = self.section_type)
 
         # Reset UI canvas
         self.canvas.delete('all')
@@ -302,9 +688,9 @@ class Alignment:
         n = len(self.string1); m = len(self.string2)
         width = (m + 2) * CELL_SIZE + 20
         height = (n + 2) * CELL_SIZE + 20
-        self.canvas.config(scrollregion = (0, 0, width, height), width = min(900, width), height = min(420,height))
+        self.canvas.config(scrollregion = (0, 0, width, height), width = min(900, width), height = min(420, height))
 
-        # Draw headers (top row: blank then seq2 letters; left col: blank then seq1 letters)
+        # Draw headers
         x0 = 10; y0 = 10
         self.draw_header_cell(0, 0, "", x0, y0)
 
@@ -313,7 +699,7 @@ class Alignment:
         for i in range(n):
             self.draw_header_cell(i + 1, 0, self.string1[i], x0, y0 + (i + 1) * CELL_SIZE)
 
-        # Draw matrix cells (including row 0 and col 0 for gaps)
+        # Draw matrix cells
         for i in range(n + 1):
             for j in range(m + 1):
                 cx = x0 + (j + 1) * CELL_SIZE
@@ -325,15 +711,15 @@ class Alignment:
         self.auto_btn.config(state = 'normal')
         self.trace_btn.config(state = 'disabled')
         self.export_btn.config(state = 'disabled')
-    
-        # Advance one initial state from generator to populate initial row/col
+
+        # Advance one initial state
         try:
             state = next(self.generator)
             self.current_state = state
             self.update_matrix(state)
         except StopIteration:
             pass
-        # Traceback/export only available after finished filling
+
         self.traceback_enabled = False
         self.export_enabled = False
 
@@ -344,39 +730,54 @@ class Alignment:
 
     def draw_score_cell(self, i, j, x, y, value = ""):
         rect = self.canvas.create_rectangle(x, y, x + CELL_SIZE, y + CELL_SIZE, fill = SCORE_BG, outline = 'black')
-        txt = self.canvas.create_text(x + 10, y + 10, anchor = 'nw', text = str(value), font=('TkDefaultFont', 10))
+        txt = self.canvas.create_text(x + 10, y + 10, anchor = 'nw', text = str(value), font = ('TkDefaultFont', 10))
         ptr_text = self.canvas.create_text(x + CELL_SIZE - 6, y + CELL_SIZE - 6, anchor = 'se', text = "", font = ('TkDefaultFont', 8, 'italic'))
         self.cell_widgets[(i, j)] = {'rect' : rect, 'text' : txt, 'ptr' : ptr_text, 'x' : x, 'y' : y}
 
     def update_matrix(self, state):
-        scores = state['scores']; pointers = state['pointers']; mode = state.get('mode', 'global')
-        current = state['current_cell']
+        scores = state.get('scores'); pointers = state.get('pointers'); mode = state.get('mode', 'global')
+        current = state.get('current_cell')
+        save_ptrs_flag = state.get('save_pointers', True)
+        section_type = state.get('section_type', 'none')
+
+        if 'pointers_checkpoint' in state:
+            self.pointers_checkpoint = state['pointers_checkpoint']
+        if 'active_cells' in state:
+            self.active_cells_snapshot = state.get('active_cells', {})
+        if 'active_ptrs' in state:
+            self.active_ptrs_snapshot = state.get('active_ptrs', {})
+
         for (i, j), w in self.cell_widgets.items():
             val = scores[i][j]
+
+            if val is None:
+                self.canvas.itemconfigure(w['text'], text = "—")
+                self.canvas.itemconfigure(w['ptr'], text = "")
+                self.canvas.itemconfigure(w['rect'], fill = SCORE_BG)
+                continue
+
             self.canvas.itemconfigure(w['text'], text = str(val))
-            ptrs = pointers[i][j]
+            ptrs = pointers[i][j] if pointers is not None else []
             pstr = ''.join(ptrs) if ptrs else ''
             self.canvas.itemconfigure(w['ptr'], text = pstr)
             self.canvas.itemconfigure(w['rect'], fill = SCORE_BG)
 
-        if current:
+        if current and isinstance(current, tuple) and current[1] is not None:
             i, j = current
             w = self.cell_widgets.get((i, j))
             if w:
                 self.canvas.itemconfigure(w['rect'], fill = HIGHLIGHT_BG)
         else:
-            # Finished filling: stop timer and measure peak memory
+            # Finished filling
             self.end_time = time.perf_counter()
             try:
                 _, peak_bytes = tracemalloc.get_traced_memory()
-                print(peak_bytes)
                 if peak_bytes > self.peak_memory_bytes:
                     self.peak_memory_bytes = peak_bytes
             except Exception:
                 self.peak_memory_bytes = 0
             tracemalloc.stop()
 
-            # Compute and display run time, memory and estimated DP space
             if self.start_time is None:
                 elapsed = 0.0
             else:
@@ -388,31 +789,44 @@ class Alignment:
             else:
                 self.mem_label.config(text = "N/A")
 
-            # Estimate DP space: number of cells * 8 bytes (size of int)
+            # Estimate DP space
             n = len(self.string1); m = len(self.string2)
-            est_bytes = (n + 1) * (m + 1) * 8
+            if section_type == 'row':
+                # Score rows saved: 2 rows * (m+1) elements
+                est_bytes = 2 * (m + 1) * 8
+            elif section_type == 'prune':
+                # Estimated active cells size
+                active_count = len(getattr(self, 'active_cells_snapshot', {}))
+                est_bytes = max( (n + 1) * (m + 1) * 8, active_count * 16 )
+            else:
+                est_bytes = (n + 1) * (m + 1) * 8
+
             self.dp_label.config(text = f"{est_bytes / 1024.0:.2f}")
             self.trace_btn.config(state = 'normal')
             self.export_btn.config(state = 'normal')
             self.traceback_enabled = True
             self.export_enabled = True
 
+        # Save last state info for possible traceback
         self.last_scores = scores
         self.last_pointers = pointers
         self.last_mode = mode
+        self._save_pointers_flag = save_ptrs_flag
+        self._section_type = section_type
 
-        # Getting Space Usage
+        # Compute measured dp bytes (approx)
         try:
-            if getattr(self, "_measured_dp_bytes", None) is not None:
-                total_dp_bytes = self._measured_dp_bytes
-            else:
-                gc.collect()
-                total_dp_bytes = get_size(self.last_scores) + get_size(self.last_pointers)
-
+            gc.collect()
+            s_bytes = get_size(self.last_scores)
+            p_bytes = get_size(self.last_pointers) if self.last_pointers is not None else 0
+            pcp_bytes = get_size(getattr(self, 'pointers_checkpoint', {}))
+            act_bytes = get_size(getattr(self, 'active_cells_snapshot', {})) + get_size(getattr(self, 'active_ptrs_snapshot', {}))
+            total_dp_bytes = s_bytes + p_bytes + pcp_bytes + act_bytes
             self.mem_total_label.config(text = f"{total_dp_bytes / 1024.0:.2f}")
+
         except Exception:
             self.mem_total_label.config(text = "N/A")
-    
+
     def step(self):
         if not self.generator:
             return
@@ -428,16 +842,6 @@ class Alignment:
                 self.export_btn.config(state = 'normal')
         except StopIteration:
             print("Done Stepping")
-
-        # Getting Space Usage
-        try:
-            s_bytes = get_size(state['scores'])
-            p_bytes = get_size(state['pointers'])
-            total_dp_bytes = s_bytes + p_bytes
-            self._measured_dp_bytes = total_dp_bytes
-            self.mem_total_label.config(text = f"{self._measured_dp_bytes / 1024.0:.2f}")
-        except Exception:
-            pass
 
     def toggle_autorun(self):
         if not self.generator:
@@ -459,8 +863,6 @@ class Alignment:
             try:
                 state = next(self.generator)
                 self.current_state = state
-
-                # Schedule the update on the main UI thread
                 self.root.after(0, lambda s = state : self.update_matrix(s))
 
                 # Updating memory peak
@@ -471,22 +873,9 @@ class Alignment:
                 except Exception:
                     pass
 
-                # Getting space usage
-                try:
-                    s_bytes = get_size(state['scores'])
-                    p_bytes = get_size(state['pointers'])
-                    total_dp_bytes = s_bytes + p_bytes
-                    
-                    self._measured_dp_bytes = total_dp_bytes
-                    self.root.after(0, lambda : self.mem_total_label.config(
-                        text = f"{self._measured_dp_bytes / 1024.0:.2f}"))
-                except Exception:
-                    pass
-
                 if state['current_cell'] is None:
                     break
 
-                # Sleep according to speed slider
                 delay_ms = self.speed_var.get() if hasattr(self, 'speed_var') else 120.0
                 time.sleep(delay_ms / 1000.0)
             except StopIteration:
@@ -496,21 +885,39 @@ class Alignment:
         self.root.after(0, lambda : self.auto_btn.config(text = 'Auto'))
 
     def show_traceback(self):
-        # If the matrix is not full
-        if not hasattr(self, 'last_pointers') or not hasattr(self, 'last_scores'):
+        if not hasattr(self, 'last_scores') or not hasattr(self, 'last_mode'):
             messagebox.showinfo("Not ready", "Matrix not filled yet.")
             return
-        
-        a1, a2, si, sj, score = traceback(self.string1, self.string2, self.last_pointers, self.last_scores, mode = self.last_mode)
+
+        # Gather extra info that may help traceback for prune mode
+        extra = {}
+        if hasattr(self, 'active_cells_snapshot'):
+            extra['active_cells'] = getattr(self, 'active_cells_snapshot')
+        if hasattr(self, 'active_ptrs_snapshot'):
+            extra['active_ptrs'] = getattr(self, 'active_ptrs_snapshot')
+        if hasattr(self, 'pointers_checkpoint'):
+            extra['pointers_checkpoint'] = getattr(self, 'pointers_checkpoint')
+
+        # Use the traceback_with_timing routine
+        aligned1, aligned2, si, sj, score, time_ms = traceback_with_timing(
+            self.string1, self.string2,
+            self.last_scores, self.last_pointers,
+            mode = self.last_mode, save_pointers = self._save_pointers_flag,
+            match = self.match, mismatch = self.mismatch, gap = self.gap,
+            section_type = self._section_type, extra_info = extra)
+
+        # Update label with traceback time
+        self.trace_time_label.config(text = f"{time_ms:.2f}")
 
         if self.last_mode == 'global':
-            text = f"Global alignment - Score: {score}\n\n{a1}\n{a2}"
+            text = f"Global alignment - Score: {score}\n\n{aligned1}\n{aligned2}"
         else:
-            text = f"Local alignment - Score: {score} at cell ({si}, {sj})\n\n{a1}\n{a2}"
+            text = f"Local alignment - Score: {score} at cell ({si}, {sj})\n\n{aligned1}\n{aligned2}"
 
         messagebox.showinfo("Traceback result", text)
         self.export_enabled = True
 
+    ### TO-DO ###
     def export_result(self):
         print("Exporting")
 
